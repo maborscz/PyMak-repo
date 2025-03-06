@@ -47,15 +47,23 @@ class MachineConfig():
         self.dirpath.mkdir(parents=True, exist_ok=True)
 
         self.pfdata = {}
-        self.pf_windings = {}
+
+        self.PFC = 0
+        self.fig, self.ax = plt.subplots(1, 1, figsize=(12,10))
+        self.ax.set_aspect('equal')
+        self.ax.set_xlabel(r'$r$ (m)')
+        self.ax.set_ylabel(r'$z$ (m)')
+
+        self.rmax, self.zmax = 0, 0
 
 
     def create_tf_coil(self,
-        rmin: float,
-        rmax: float,
-        nturns: int,
+        r1: float = 0.12,
+        r2: float = 0.55,
+        r1_to_inner: float = 0.01626,
+        r1_to_outer: float = 0.01626,
+        nturns: int = 10,
         ncoils: int = 8,
-        D: float = 11.9e-3,
         N1: int = 50,
         N2: int = 5
     ):
@@ -79,61 +87,51 @@ class MachineConfig():
             Number of points to represent straight section, by default 5
         """
         # Princeton Dee parameters
-        r0 = np.sqrt(rmin * rmax)
-        k = 1/2 * np.log(rmax/rmin)
+        r0 = np.sqrt(r1 * r2)
+        k = 1/2 * np.log(r2/r1)
 
         # Solve Princeton Dee differential equation in polar form
-        func = lambda t, y: [y[1], (y[0]**2 + 2*y[1]**2 - (y[0]**2 + y[1]**2)**(3/2)/(k*(y[0]*np.cos(t) + rmin)))/y[0]]
+        func = lambda t, y: [y[1], (y[0]**2 + 2*y[1]**2 - (y[0]**2 + y[1]**2)**(3/2)/(k*(y[0]*np.cos(t) + r1)))/y[0]]
         t = np.linspace(0, np.pi/2, N1)
-        rho = solve_ivp(func, [t[0], t[-1]], [rmax - rmin, 0], t_eval=t, method='RK45').y[0]
+        rho = solve_ivp(func, [t[0], t[-1]], [r2 - r1, 0], t_eval=t, method='RK45').y[0]
 
-        # Create (r, z) cooridnates for full Dee shape
-        r, z = rho * np.cos(t) + rmin, rho * np.sin(t)
-        r = np.concatenate([r, np.full(N2, rmin), r[:0:-1]])
+        # Create (r, z) coordinates for full Dee shape
+        r, z = rho * np.cos(t) + r1, rho * np.sin(t)
+        r = np.concatenate([r, np.full(N2, r1), r[:0:-1]])
         z = np.concatenate([z, np.linspace(1, -1, N2) * np.pi * k * iv(1, k) * r0, -z[:0:-1]])
+        self.tf_dee = np.stack([r, z], axis=-1)
 
         # Calculate angle of dz/dr gradient
-        theta = np.arctan2(-np.gradient(z), -np.gradient(r))
+        theta = np.arctan2(-np.gradient(r), np.gradient(z))#np.arctan2(-np.gradient(z), -np.gradient(r))
 
-        # Calculate size and number of layers for triangular packing
-        li = np.ceil((np.sqrt(8*nturns + 1) - 1)/2)
-        lf = np.floor((np.sqrt(4*(li*(li + 1) - 2*nturns) + 1) - 1)/2)
-        extra = li*(li + 1)/2 - lf*(lf + 1)/2 - nturns
+        self.tf_inner = self.tf_dee.copy()
+        self.tf_inner[:, 0] -= r1_to_inner * np.cos(theta)
+        self.tf_inner[:, 1] -= r1_to_inner * np.sin(theta)
 
-        # Calculate (r, z) cooridnates of each winding, assuming triangular packing
-        windings = []
-        x0 = np.sqrt((rmin - D/2)**2 - ((lf - 1) * D/2)**2)
-        for i in range(int(li), int(lf), -1):
-            y0 = sorted(np.linspace(-D, D, i) * (i - 1)/2, key=np.abs)
-            if i == lf + 1 and extra > 0:
-                y0 = y0[:-int(extra)]
+        self.tf_outer = self.tf_dee.copy()
+        self.tf_outer[:, 0] += r1_to_outer * np.cos(theta)
+        self.tf_outer[:, 1] += r1_to_outer * np.sin(theta)
 
-            for _y0 in y0:
-                # Windings are assumed to be expansions around guideline
-                winding = np.empty((len(r), 3))
-                winding[:, 0] = r - (rmin - x0) * np.sin(theta)
-                winding[:, 1] = _y0
-                winding[:, 2] = z + (rmin - x0) * np.cos(theta)
-                windings.append(winding)
+        self.rmax = max(self.rmax, np.max(self.tf_outer[:, 0]))
+        self.zmax = max(self.zmax, np.max(np.abs(self.tf_outer[:, 1])))
 
-            x0 -= D * np.sqrt(3)/2
-
+        self.ax.add_patch(patches.Polygon(self.tf_dee, fill=False, ls='-', color='purple', label='TF Centroid'))
+        self.ax.add_patch(patches.Polygon(self.tf_outer, fill=False, ls='--', color='purple', label='TF Boundary'))
+        self.ax.add_patch(patches.Polygon(self.tf_inner, fill=False, ls='--', color='purple'))
+            
         self.tfdata = {
             'ncoils': int(ncoils),
             'nturns': int(nturns),
-            'rmin': float(rmin),
-            'rmax': float(rmax),
-            'D': float(D),
+            'r1': float(r1),
+            'r2': float(r2),
         }
-        self.tf_windings = np.array(windings)
-        self.tf_dee = np.stack([r, z], axis=-1)
-
+        
 
     def create_cs_coil(self,
-        rmin: float,
-        nturns: int,
-        nlayers: int,
-        D: float = 4.85e-3,
+        r: float = 0.0846,
+        width: float = 0.0091,
+        height: float = 0.3929,
+        nturns: int = 161,
     ):
         """Define the CS parameters and create the windings, assuming triangular packing
 
@@ -148,19 +146,16 @@ class MachineConfig():
         D : float, optional
             CS cable diameter, by default 4.85e-3
         """
-        width = ((nlayers - 1) * np.sqrt(3)/2 + 1) * D
-        rc = rmin + width/2
-
-        self.create_pf_coil('CS', rc, 0, nturns, nlayers, D)
+        self.create_pf_coil('CS', r, 0, width, height, nturns)
 
     
     def create_pf_coil(self,
         name: str,
-        rc: float ,
-        zc: float,
-        nturns: int,
-        nlayers: int,
-        D: float = 4.85e-3,
+        r: float ,
+        z: float,
+        width: float,
+        height: float,
+        nturns: int = 1,
     ):
         """Define the parameters for a PF coil and create the windings, assuming triangular packing
 
@@ -179,122 +174,88 @@ class MachineConfig():
         D : float, optional
             PF cable diameter, by default 4.85e-3
         """
-        n = np.ceil((nturns + np.floor(nlayers/2))/nlayers)
-        extra = n * nlayers - np.floor(nlayers/2) - nturns
-
-        width = ((nlayers - 1) * np.sqrt(3)/2 + 1) * D
-        height = n * D
-        r0 = -(width - D)/2
-
-        # Calculate winding positions, assuming triangular packing
-        r, z = [], []
-        for i in range(nlayers):
-            if i % 2 == 0: m = n
-            else: m = n - 1
-            
-            z0 = sorted(np.linspace(-D, D, int(m)) * (m - 1)/2, key=np.abs)
-            if i == nlayers - 1 and extra > 0:
-                z0 = z0[:-int(extra)]
-            
-            r += [r0] * len(z0)
-            z += z0
-
-            r0 += D * np.sqrt(3)/2
-
-        windings = np.stack([r, z], axis=-1) + np.array([rc, zc])
+        xy = (r - width/2, z - height/2)
+        self.ax.add_patch(patches.Rectangle(xy, width, height, color=f'C{self.PFC}', label=name))
+        self.PFC += 1
+        self.rmax = max(self.rmax, r + width/2)
+        self.zmax = max(self.zmax, np.abs(z) + height/2)
 
         self.pfdata[name] = {
-            'nturns': int(nturns),
-            'rc': float(rc),
-            'zc': float(zc),
-            'w': float(width),
-            'h': float(height),
-            'D': float(D),
+            'nturns': nturns,
+            'r': r,
+            'z': z,
+            'width': width,
+            'height': height,
         }
-        self.pf_windings[name] = windings
 
     
-    def create_vessel(self,
-        r0: float = 0.316,
-        OD: float = 0.162,
-        t: float = 0.01,
-    ):
-        """Create vacuum vessel parameters, asumming it has a circular cross-section
-
-        Parameters
-        ----------
-        r0 : float, optional
-            Major radius, by default 0.316
-        OD : float, optional
-            Outer diamater, by default 0.162
-        t : float, optional
-            Wall thickness, by default 0.01
+    def create_vessel(self):
+        """Create vacuum vessel parameters, assuming it has a circular cross-section.
         """
-        self.vvdata = {
-            'r0': float(r0),
-            'OD': float(OD),
-            't': float(t),
+        # All data taken from Master CAD
+        major_radius, minor_radius, thickness = 0.3156, 0.1574, 0.0046
+        self.limiter_data = {
+            'major_radius': major_radius,
+            'minor_radius': minor_radius,
+            'thickness': thickness,
         }
+        
+        self.rmax = max(self.rmax, 0.4776)
+        self.zmax = max(self.zmax, 0.162)
+
+        self.ax.add_patch(patches.Annulus((major_radius, 0), minor_radius + thickness, thickness, fc='silver', label='VV'))
+
+        self.ax.add_patch(patches.Circle((major_radius, 0), 0.2080, ec='black', fill=False, ls=':', label='Flange Boundary'))
+
+        self.ax.plot((0.4345, 0.5076), (0.11, 0.11), color='black', ls=':')
+        self.ax.plot((0.4345, 0.5076), (-0.11, -0.11), color='black', ls=':')
+        self.ax.add_patch(patches.Rectangle((0.5076, -0.143), 0.077, 0.286, ec='black', fill=False, ls=':'))
+
+        self.ax.plot((0.3965, 0.3965), (0.1404, 0.1883), color='black', ls=':')
+        self.ax.plot((0.2436, 0.2436), (0.1451, 0.1883), color='black', ls=':')
+        self.ax.add_patch(patches.Rectangle((0.2071, 0.1883), 0.226, 0.077, ec='black', fill=False, ls=':'))
+
+        self.ax.plot((0.3965, 0.3965), (-0.1404, -0.1883), color='black', ls=':')
+        self.ax.plot((0.2436, 0.2436), (-0.1451, -0.1883), color='black', ls=':')
+        self.ax.add_patch(patches.Rectangle((0.2071, -0.1883), 0.226, -0.077, ec='black', fill=False, ls=':'))
 
 
     def plot_machine(self):
         """Plot coils and vacuum vessel and save to `dirpath`
         """
-        fig, ax = plt.subplots(1, 1, figsize=(12,10))
-        ax.set_aspect('equal')
-        
-        if hasattr(self, 'tf_windings'):
-            for tf in self.tf_windings:
-                ax.plot(*tf.T[[0, 2]], color='purple')
-            ax.plot(*self.tf_guideline.T[[0, 2]], ls='--', color='purple', label='TF Dee')
+        self.ax.set_xlim(0, self.rmax*1.2)
+        self.ax.set_ylim(-self.zmax*1.2, self.zmax*1.2)
+        self.ax.legend(loc='upper right')
 
-        if hasattr(self, 'vvdata'):
-            vessel = patches.Annulus((self.vvdata['r0'], 0), self.vvdata['OD'], self.vvdata['t'], fill=True, color='silver', label='VV')
-            ax.add_patch(vessel)
-
-        for i, (name, pf) in enumerate(self.pf_windings.items()):
-            for (r, z) in pf:
-                circ = patches.Circle((r, z), radius=self.pfdata[name]['D']/2, color='purple')
-                ax.add_patch(circ)
-
-            xy = (self.pfdata[name]['rc'] - self.pfdata[name]['w']/2, self.pfdata[name]['zc'] - self.pfdata[name]['h']/2)
-            rect = patches.Rectangle(xy, self.pfdata[name]['w'], self.pfdata[name]['h'], linewidth=2, edgecolor=f'C{i}', facecolor='none', label=name)
-            ax.add_patch(rect)
-
-        ax.set_xlabel(r'$r$ (m)')
-        ax.set_ylabel(r'$z$ (m)')
-        ax.set_xlim(left=0)
-        plt.legend(loc='upper right')
         plt.savefig(self.dirpath / 'machine.png', bbox_inches='tight', dpi=1200)
         
 
     def save(self):
         """Save machine configuration to a .yaml file, windings to a .npz file and plot the machine cross-section
         """
+        self.create_vessel()
+        self.plot_machine()
+
         data = {
-            'VV': self.vvdata,
+            'limiter': self.limiter_data,
             'TF': self.tfdata,
             'PF': self.pfdata
         }
         with open(self.dirpath / 'cfg.yaml', 'w') as f:
             yaml.dump(data, f)
         
-        np.savez(self.dirpath / 'windings.npz', TF=self.tf_windings, PF=self.pf_windings)
-
-        self.plot_machine()
-
+        #np.savez(self.dirpath / 'windings.npz', TF=self.tf_windings, PF=self.pf_windings)
 
 
 if __name__ == '__main__':
-    cfg = MachineConfig('test')
-    cfg.create_tf_coil(0.125, 0.55, 10)
-    cfg.create_cs_coil(0.055, 185, 3)
-    cfg.create_pf_coil('PF1U', 0.18, 0.20, 15, 6)
-    cfg.create_pf_coil('PF1L', 0.18, -0.20, 15, 6)
-    cfg.create_pf_coil('PF2U', 0.44, 0.20, 5, 3)
-    cfg.create_pf_coil('PF2L', 0.44, -0.20, 5, 3)
-    cfg.create_pf_coil('PF3U', 0.5, 0.13, 5, 3)
-    cfg.create_pf_coil('PF3L', 0.5, -0.13, 5, 3)
-    cfg.create_vessel()
+    cfg = MachineConfig('SOUTH')
+    cfg.create_tf_coil()
+    cfg.create_cs_coil()
+    cfg.create_pf_coil('PF1U', 0.18, 0.18, 0.0267, 0.0133, nturns=15)
+    cfg.create_pf_coil('PF2U', 0.44, 0.18, 0.0121, 0.0133, nturns=6)
+    cfg.create_pf_coil('PF3U', 0.49, 0.13, 0.0121, 0.0133, nturns=6)
+    cfg.create_pf_coil('PF1L', 0.18, -0.18, 0.0267, 0.0133, nturns=15)
+    cfg.create_pf_coil('PF2L', 0.44, -0.18, 0.0121, 0.0133, nturns=6)
+    cfg.create_pf_coil('PF3L', 0.49, -0.13, 0.0121, 0.0133, nturns=6)    
 
     cfg.save()

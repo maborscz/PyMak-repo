@@ -1,0 +1,52 @@
+PF:
+  CS:
+    height: 0.3929
+    nturns: 161
+    r: 0.0846
+    width: 0.0091
+    z: 0
+  PF1L:
+    height: 0.0133
+    nturns: 15
+    r: 0.18
+    width: 0.0267
+    z: -0.18
+  PF1U:
+    height: 0.0133
+    nturns: 15
+    r: 0.18
+    width: 0.0267
+    z: 0.18
+  PF2L:
+    height: 0.0133
+    nturns: 6
+    r: 0.44
+    width: 0.0121
+    z: -0.18
+  PF2U:
+    height: 0.0133
+    nturns: 6
+    r: 0.44
+    width: 0.0121
+    z: 0.18
+  PF3L:
+    height: 0.0133
+    nturns: 6
+    r: 0.49
+    width: 0.0121
+    z: -0.13
+  PF3U:
+    height: 0.0133
+    nturns: 6
+    r: 0.49
+    width: 0.0121
+    z: 0.13
+TF:
+  ncoils: 8
+  nturns: 10
+  r1: 0.12
+  r2: 0.55
+limiter:
+  major_radius: 0.3156
+  minor_radius: 0.1574
+  thickness: 0.0046
