@@ -1,12 +1,19 @@
-from pathlib import Path
-import numpy as np
-from scipy.integrate import solve_ivp
-from scipy.special import iv
 import matplotlib.pyplot as plt
 from matplotlib import patches
-import yaml
+import numpy as np
 from numpy.typing import ArrayLike
+import pandas as pd
+from pathlib import Path
+from scipy.integrate import solve_ivp
+from scipy.special import iv
+import yaml
 
+from OpenFUSIONToolkit.TokaMaker import TokaMaker
+from OpenFUSIONToolkit.TokaMaker.meshing import gs_Domain, save_gs_mesh, load_gs_mesh
+from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+
+
+# TODO: Fix documentation
 
 class MachineConfig():
     """Configuration of machine geometry (coils and vaccuum vessel)
@@ -48,7 +55,7 @@ class MachineConfig():
 
         self.pfdata = {}
 
-        self.PFC = 0
+        self.PF_colour = 0
         self.fig, self.ax = plt.subplots(1, 1, figsize=(12,10))
         self.ax.set_aspect('equal')
         self.ax.set_xlabel(r'$r$ (m)')
@@ -65,7 +72,8 @@ class MachineConfig():
         nturns: int = 10,
         ncoils: int = 8,
         N1: int = 50,
-        N2: int = 5
+        N2: int = 5,
+        sldcrv: bool = True,
     ):
         """Define the TF coil parameters and create the windings, assuming triangular packing
 
@@ -102,7 +110,7 @@ class MachineConfig():
         self.tf_dee = np.stack([r, z], axis=-1)
 
         # Calculate angle of dz/dr gradient
-        theta = np.arctan2(-np.gradient(r), np.gradient(z))#np.arctan2(-np.gradient(z), -np.gradient(r))
+        theta = np.arctan2(-np.gradient(r), np.gradient(z))
 
         self.tf_inner = self.tf_dee.copy()
         self.tf_inner[:, 0] -= r1_to_inner * np.cos(theta)
@@ -125,7 +133,30 @@ class MachineConfig():
             'r1': float(r1),
             'r2': float(r2),
         }
-        
+
+        if sldcrv == True:
+            self._save_tf_as_sldcrv('dee')
+            self._save_tf_as_sldcrv('inner')
+            self._save_tf_as_sldcrv('outer')
+            
+
+    def _save_tf_as_sldcrv(self,
+        curve: str,
+    ) -> None:
+        if curve == 'dee':
+            r, z = self.tf_dee.T
+        elif curve == 'inner':
+            r, z = self.tf_inner.T
+        elif curve == 'outer':
+            r, z = self.tf_outer.T
+
+        X = np.char.add(r.astype('str'), 'm')
+        Y = np.char.add(z.astype('str'), 'm')
+        Z = np.char.add(np.zeros_like(r).astype('str'), 'm')
+
+        df = pd.DataFrame([X, Y, Z]).T
+        df.to_csv(self.dirpath / f'tf_{curve}.sldcrv', index=None, header=None, sep=' ')
+
 
     def create_cs_coil(self,
         r: float = 0.0846,
@@ -156,6 +187,7 @@ class MachineConfig():
         width: float,
         height: float,
         nturns: int = 1,
+        coilset: str = None,
     ):
         """Define the parameters for a PF coil and create the windings, assuming triangular packing
 
@@ -175,8 +207,8 @@ class MachineConfig():
             PF cable diameter, by default 4.85e-3
         """
         xy = (r - width/2, z - height/2)
-        self.ax.add_patch(patches.Rectangle(xy, width, height, color=f'C{self.PFC}', label=name))
-        self.PFC += 1
+        self.ax.add_patch(patches.Rectangle(xy, width, height, color=f'C{self.PF_colour}', label=name))
+        self.PF_colour += 1
         self.rmax = max(self.rmax, r + width/2)
         self.zmax = max(self.zmax, np.abs(z) + height/2)
 
@@ -187,6 +219,9 @@ class MachineConfig():
             'width': width,
             'height': height,
         }
+
+        if coilset is not None:
+            self.pfdata[name]['coilset'] = coilset
 
     
     def create_vessel(self):
@@ -230,8 +265,8 @@ class MachineConfig():
         plt.savefig(self.dirpath / 'machine.png', bbox_inches='tight', dpi=1200)
         
 
-    def save(self):
-        """Save machine configuration to a .yaml file, windings to a .npz file and plot the machine cross-section
+    def save_cfg(self):
+        """Save machine configuration to a .yaml file and plot the machine cross-section
         """
         self.create_vessel()
         self.plot_machine()
@@ -239,23 +274,37 @@ class MachineConfig():
         data = {
             'limiter': self.limiter_data,
             'TF': self.tfdata,
-            'PF': self.pfdata
+            'PF': self.pfdata,
+            'rmax': round(float(self.rmax), 3),
+            'zmax': round(float(self.zmax), 3),
         }
         with open(self.dirpath / 'cfg.yaml', 'w') as f:
             yaml.dump(data, f)
         
-        #np.savez(self.dirpath / 'windings.npz', TF=self.tf_windings, PF=self.pf_windings)
+
+    def save_mesh(self,
+        plasma_dx: float = 5e-3,
+        coil_dx: float = 1e-2,
+        vv_dx: float = 1e-2,
+        vac_dx: float = 1e-2,
+        noncontinuous: bool = False,
+    ):
+        self.mesh = gs_Domain(rextent=self.rmax, zextents=[-self.zmax, self.zmax])
+        self.mesh.define_region('air', vac_dx, 'boundary')
+        self.mesh.define_region('plasma', plasma_dx, 'plasma')
+        self.mesh.define_region('vv', vv_dx, 'conductor', eta=6.9E-7, noncontinuous=noncontinuous)
+
 
 
 if __name__ == '__main__':
     cfg = MachineConfig('SOUTH')
     cfg.create_tf_coil()
     cfg.create_cs_coil()
-    cfg.create_pf_coil('PF1U', 0.18, 0.18, 0.0267, 0.0133, nturns=15)
-    cfg.create_pf_coil('PF2U', 0.44, 0.18, 0.0121, 0.0133, nturns=6)
-    cfg.create_pf_coil('PF3U', 0.49, 0.13, 0.0121, 0.0133, nturns=6)
-    cfg.create_pf_coil('PF1L', 0.18, -0.18, 0.0267, 0.0133, nturns=15)
-    cfg.create_pf_coil('PF2L', 0.44, -0.18, 0.0121, 0.0133, nturns=6)
-    cfg.create_pf_coil('PF3L', 0.49, -0.13, 0.0121, 0.0133, nturns=6)    
+    cfg.create_pf_coil('PF1U', 0.18, 0.18, 0.0267, 0.0133, nturns=15, coilset='PF1')
+    cfg.create_pf_coil('PF2U', 0.44, 0.18, 0.0121, 0.0133, nturns=6, coilset='PF2')
+    cfg.create_pf_coil('PF3U', 0.49, 0.13, 0.0121, 0.0133, nturns=6, coilset='PF3')
+    cfg.create_pf_coil('PF1L', 0.18, -0.18, 0.0267, 0.0133, nturns=15, coilset='PF1')
+    cfg.create_pf_coil('PF2L', 0.44, -0.18, 0.0121, 0.0133, nturns=6, coilset='PF2')
+    cfg.create_pf_coil('PF3L', 0.49, -0.13, 0.0121, 0.0133, nturns=6, coilset='PF3')    
 
-    cfg.save()
+    cfg.save_cfg()
